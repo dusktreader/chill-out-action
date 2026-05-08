@@ -22,8 +22,12 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-ACTION_YML = Path(__file__).parent.parent / "action.yml"
-VERSION_RE  = re.compile(r"^(#\s*version:\s*)(\d+\.\d+\.\d+)", re.MULTILINE)
+ACTION_YML   = Path(__file__).parent.parent / "action.yml"
+CHANGELOG_MD = Path(__file__).parent.parent / "CHANGELOG.md"
+VERSION_RE   = re.compile(r"^(#\s*version:\s*)(\d+\.\d+\.\d+)", re.MULTILINE)
+# Matches a Keep-a-Changelog-style level-2 heading whose first token is a version
+# number, e.g. "## 1.0.0" or "## 1.0.0 — 2026-05-08".
+ENTRY_RE     = re.compile(r"^##\s+(\d+\.\d+\.\d+)", re.MULTILINE)
 
 
 class BumpType(str, enum.Enum):
@@ -56,6 +60,29 @@ def _run(cmd: list[str], *, dry_run: bool = False) -> str:
         return ""
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return result.stdout.strip()
+
+
+def _extract_release_notes(version: str) -> str:
+    """
+    Extract the body of the changelog entry for the given version.
+
+    Finds the level-2 heading whose first token matches `version`, then returns
+    everything up to (but not including) the next level-2 heading or EOF.
+    """
+    if not CHANGELOG_MD.exists():
+        return ""
+
+    text = CHANGELOG_MD.read_text()
+    matches = list(ENTRY_RE.finditer(text))
+
+    for i, m in enumerate(matches):
+        if m.group(1) != version:
+            continue
+        body_start = m.end()
+        body_end   = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        return text[body_start:body_end].strip()
+
+    return ""
 
 
 @app.command()
@@ -99,11 +126,11 @@ def bump(
 def publish(
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Print what would happen without creating or pushing any tags."),
+        typer.Option("--dry-run", help="Print what would happen without making any changes."),
     ] = False,
 ) -> None:
-    """Tag the current version and push to origin."""
-    version   = _read_version(ACTION_YML)
+    """Tag the release, push, and create the GitHub release from CHANGELOG.md."""
+    version    = _read_version(ACTION_YML)
     semver_tag = f"v{version}"
     major_tag  = f"v{version.split('.')[0]}"
 
@@ -112,8 +139,18 @@ def publish(
     console.print(f"  tag     : [bold]{semver_tag}[/bold]")
     console.print(f"  floating: [bold]{major_tag}[/bold]")
     if dry_run:
-        console.print("\n  [yellow]dry-run — no tags will be created or pushed[/yellow]")
+        console.print("\n  [yellow]dry-run — nothing will be written or pushed[/yellow]")
     console.print()
+
+    notes = _extract_release_notes(version)
+    if notes:
+        console.print("  [green]✓[/green] found release notes in CHANGELOG.md")
+    else:
+        console.print(
+            f"  [red]error:[/red] no changelog entry found for {version}\n"
+            f"  Add a '## {version}' section to CHANGELOG.md before publishing."
+        )
+        raise typer.Exit(1)
 
     try:
         _run(["git", "tag", semver_tag], dry_run=dry_run)
@@ -123,7 +160,14 @@ def publish(
         console.print(f"  [green]✓[/green] updated floating tag [bold]{major_tag}[/bold]")
 
         _run(["git", "push", "origin", semver_tag, major_tag, "--force"], dry_run=dry_run)
-        console.print("  [green]✓[/green] pushed to origin")
+        console.print("  [green]✓[/green] pushed tags to origin")
+
+        _run(
+            ["gh", "release", "create", semver_tag, "--title", semver_tag, "--notes", notes, "--latest"],
+            dry_run=dry_run,
+        )
+        console.print(f"  [green]✓[/green] created GitHub release [bold]{semver_tag}[/bold]")
+
     except subprocess.CalledProcessError as e:
         console.print(f"\n[red]error:[/red] {e.stderr.strip() or e}")
         raise typer.Exit(1)
@@ -131,7 +175,7 @@ def publish(
     console.print()
     console.print(Rule())
     if dry_run:
-        console.print("[yellow]dry-run complete — nothing was pushed[/yellow]")
+        console.print("[yellow]dry-run complete — nothing was changed[/yellow]")
     else:
         console.print(f"[green]released {semver_tag}[/green]")
 

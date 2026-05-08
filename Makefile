@@ -16,10 +16,10 @@ lint-yaml: ## Lint all YAML files with yamllint
 bump/%: ## Bump the version in action.yml (major | minor | patch)
 	$(VERSION_SCRIPT) bump --type $(notdir $@)
 
-publish: ## Tag and push the current version to origin
+publish: ## Tag, push, and create the GitHub release from CHANGELOG.md
 	$(VERSION_SCRIPT) publish
 
-publish-dry-run: ## Show what publish would do without pushing
+publish-dry-run: ## Show what publish would do without making any changes
 	$(VERSION_SCRIPT) publish --dry-run
 
 
