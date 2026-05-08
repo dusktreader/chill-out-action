@@ -1,0 +1,245 @@
+# version: 1.0.0
+name: "chill-out"
+description: "Audit your lockfile for packages that are too fresh to trust."
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  command:
+    description: |
+      The chill-out command to run. One of:
+        'check': read-only audit, fails if violations found
+        'fix':   auto-pin violating packages to safe versions, commit to a new
+                 branch, and open a pull request against base-branch
+    required: false
+    default: check
+
+  version:
+    description: >
+      The version of chill-out to use. Accepts any version specifier accepted
+      by uv (e.g. '0.1.0', '>=0.1.0', or 'latest'). Defaults to 'latest'.
+    required: false
+    default: latest
+
+  root:
+    description: >
+      Path to the project root (the directory containing the lockfile).
+      Defaults to the repository root.
+    required: false
+    default: "."
+
+  ecosystem:
+    description: >
+      Force a specific ecosystem ('pypi' or 'npm'). Auto-detected when omitted.
+    required: false
+    default: ""
+
+  fast:
+    description: >
+      Skip the safe-version lookup when running 'check'. Faster, but no fix
+      suggestions are shown. Has no effect when command is 'fix'.
+    required: false
+    default: "false"
+
+  fix-style:
+    description: >
+      Override the configured fix style for a 'fix' run. One of 'exact' or
+      'compatible'. Has no effect when command is 'check'.
+    required: false
+    default: ""
+
+  recheck:
+    description: >
+      After applying fixes, re-run the check to confirm they took. Only
+      relevant when command is 'fix'. Defaults to 'true'.
+    required: false
+    default: "true"
+
+  cleanup:
+    description: >
+      Before computing fresh fixes, remove any pins chill-out wrote on
+      previous runs whose underlying release has now cleared cooldown. Only
+      relevant when command is 'fix'. Defaults to 'true'.
+    required: false
+    default: "true"
+
+  base-branch:
+    description: >
+      The branch that the fix PR will target. Defaults to the repository's
+      default branch. Only relevant when command is 'fix'.
+    required: false
+    default: ""
+
+  commit-message:
+    description: >
+      The commit message and PR title used when command is 'fix'. Defaults to
+      'fix: pin cooldown violations [chill-out]'.
+    required: false
+    default: "fix: pin cooldown violations [chill-out]"
+
+  github-token:
+    description: >
+      GitHub token used to push the fix branch and open the pull request.
+      Pass secrets.GITHUB_TOKEN or a PAT with contents:write and
+      pull-requests:write scopes. Only relevant when command is 'fix'.
+    required: false
+    default: ${{ github.token }}
+
+  uv-version:
+    description: >
+      The version of uv to install (e.g. '0.5.0'). Passed to astral-sh/setup-uv
+      as the 'version' input. Defaults to 'latest'.
+    required: false
+    default: latest
+
+  setup-uv-version:
+    description: >
+      The version of the astral-sh/setup-uv action to use (e.g. 'v5'). Defaults to 'v6'.
+    required: false
+    default: "v6"
+
+outputs:
+  exit-code:
+    description: >
+      The exit code returned by chill-out. 0 means all clear; non-zero means
+      violations were found or the command failed.
+    value: ${{ steps.run.outputs.exit-code }}
+
+  pr-url:
+    description: >
+      URL of the pull request opened or updated by a 'fix' run. Empty when
+      command is 'check' or when no violations were found.
+    value: ${{ steps.open-pr.outputs.pr-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@${{ inputs.setup-uv-version }}
+      with:
+        version: ${{ inputs.uv-version }}
+
+    - name: Build chill-out args
+      id: args
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        ROOT: ${{ inputs.root }}
+        ECOSYSTEM: ${{ inputs.ecosystem }}
+        FAST: ${{ inputs.fast }}
+        FIX_STYLE: ${{ inputs.fix-style }}
+        RECHECK: ${{ inputs.recheck }}
+        CLEANUP: ${{ inputs.cleanup }}
+      run: |
+        ARGS=""
+
+        if [[ -n "$ROOT" && "$ROOT" != "." ]]; then
+          ARGS="$ARGS --root $ROOT"
+        fi
+
+        if [[ -n "$ECOSYSTEM" ]]; then
+          ARGS="$ARGS --ecosystem $ECOSYSTEM"
+        fi
+
+        if [[ "$COMMAND" == "check" ]]; then
+          if [[ "$FAST" == "true" ]]; then
+            ARGS="$ARGS --fast"
+          fi
+        fi
+
+        if [[ "$COMMAND" == "fix" ]]; then
+          if [[ -n "$FIX_STYLE" ]]; then
+            ARGS="$ARGS --fix-style $FIX_STYLE"
+          fi
+          if [[ "$RECHECK" == "false" ]]; then
+            ARGS="$ARGS --no-recheck"
+          fi
+          if [[ "$CLEANUP" == "false" ]]; then
+            ARGS="$ARGS --no-cleanup"
+          fi
+          ARGS="$ARGS --yes"
+        fi
+
+        echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+
+    - name: Run chill-out ${{ inputs.command }}
+      id: run
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        if [[ "$VERSION" == "latest" ]]; then
+          PACKAGE="chill-out"
+        else
+          PACKAGE="chill-out==$VERSION"
+        fi
+
+        set +e
+        uvx "$PACKAGE" "$COMMAND" ${{ steps.args.outputs.args }}
+        EXIT_CODE=$?
+        set -e
+
+        echo "exit-code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+        exit $EXIT_CODE
+
+    - name: Open or update fix PR
+      id: open-pr
+      if: inputs.command == 'fix'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+      run: |
+        # Resolve base branch — fall back to the repo default.
+        if [[ -z "$BASE_BRANCH" ]]; then
+          BASE_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')"
+        fi
+
+        # Check whether a chill-out fix PR is already open against this base.
+        EXISTING_PR="$(gh pr list \
+          --base "$BASE_BRANCH" \
+          --state open \
+          --json number,headRefName,url \
+          --jq 'first(.[] | select(.headRefName | startswith("fix/chill-out-")))')"
+
+        if [[ -n "$EXISTING_PR" ]]; then
+          # Reuse the existing branch so the open PR gets updated.
+          FIX_BRANCH="$(echo "$EXISTING_PR" | jq -r '.headRefName')"
+          PR_URL="$(echo "$EXISTING_PR" | jq -r '.url')"
+          git fetch origin "$FIX_BRANCH"
+          git checkout "$FIX_BRANCH"
+        else
+          TIMESTAMP="$(date -u '+%Y%m%d-%H%M%S')"
+          FIX_BRANCH="fix/chill-out-${TIMESTAMP}"
+          git checkout -b "$FIX_BRANCH"
+        fi
+
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Only commit and push if chill-out actually changed something.
+        if git diff --quiet && git diff --staged --quiet; then
+          echo "No changes to commit — lockfile already clean."
+          echo "pr-url=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git commit -am "$COMMIT_MESSAGE"
+        git push origin "$FIX_BRANCH"
+
+        if [[ -z "${PR_URL:-}" ]]; then
+          PR_BODY="$(printf 'Packages pinned automatically by [chill-out](https://github.com/dusktreader/chill-out).\n\n'
+            printf 'One or more dependencies in the lockfile were published too recently to trust. '
+            printf 'This PR pins them to the latest version that has cleared the configured cooldown window.')"
+          PR_URL="$(gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$FIX_BRANCH" \
+            --title "$COMMIT_MESSAGE" \
+            --body "$PR_BODY")"
+        fi
+
+        echo "pr-url=$PR_URL" >> "$GITHUB_OUTPUT"
