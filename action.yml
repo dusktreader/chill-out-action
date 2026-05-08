@@ -1,5 +1,5 @@
 # version: 1.0.0
-name: "chill-out"
+name: "chill-out-action"
 description: "Audit your lockfile for packages that are too fresh to trust."
 
 branding:
