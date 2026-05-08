@@ -1,5 +1,7 @@
 # chill-out-action
 
+![chill-out-action](https://github.com/dusktreader/chill-out/blob/main/docs/source/images/chill-action-600.png?raw=true)
+
 _Run chill-out in CI to catch zero-day supply chain threats before they land in production._
 
 `chill-out-action` is a composite GitHub Action that wraps the
